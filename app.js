@@ -418,17 +418,21 @@
     micSource = null;
     micAnalyser = null;
     micDataArray = null;
-    micFloatArray = null;
+    micPrevSpectrum = null;
+    micFluxBuffer = [];
+    micFluxCanvasArr = [];
     micEnergyHistory = [];
     micPeakTimes = [];
-    micNoiseFloor = 0.01;
-    micAdaptiveThreshold = 0.08;
-    micConsecutiveAboveCount = 0;
+    micTempoBPM = null;
+    micTempoConf = 0;
+    micFrameCount = 0;
     if (micAnimFrame) cancelAnimationFrame(micAnimFrame);
     micBtn.textContent = '开始监听';
     micBtn.classList.remove('listening');
     micBpm.textContent = '—';
     micConfidence.textContent = '';
+    micEnergyLabel.textContent = '';
+    micEnergyFill.style.width = '0%';
   }
 
   function resizeMicCanvas() {
@@ -438,154 +442,228 @@
     if (micCtx2d) micCtx2d.scale(devicePixelRatio, devicePixelRatio);
   }
 
+  //
+  // SPECTRAL FLUX ONSET DETECTION + AUTOCORRELATION TEMPO ESTIMATION
+  // Based on standard MIR beat-tracking pipeline:
+  //   1. Compute spectral flux (onset detection function)
+  //   2. Run autocorrelation on flux signal
+  //   3. Find dominant period -> BPM
+  //
+
+  // Sub-band boundaries for FFT bins (sr=44100, fftSize=1024 -> 512 bins, ~43Hz/bin)
+  //   Band 0 (sub): bins 0-2   ~0-130Hz   (kick thump)
+  //   Band 1 (low): bins 3-7   ~130-345Hz (kick+snare body)
+  //   Band 2 (mid): bins 8-25  ~345-1100Hz (snare+toms)
+  //   Band 3 (high):bins 26-100~1100-4300Hz(hihats+transients)
+  //   Band 4 (top): bins 101-200~4300-8600Hz(crisp attacks)
+  const SUB_BANDS = [
+    { lo: 0,  hi: 2,   weight: 0.8 },
+    { lo: 3,  hi: 7,   weight: 1.0 },
+    { lo: 8,  hi: 25,  weight: 1.2 },
+    { lo: 26, hi: 100, weight: 1.5 },
+    { lo: 101,hi: 200, weight: 1.3 }
+  ];
+
+  function computeBandEnergy(spectrum, lo, hi) {
+    let e = 0;
+    for (let i = lo; i <= hi && i < spectrum.length; i++) {
+      // Normalize 0-255 to 0-1
+      e += spectrum[i] / 255;
+    }
+    return e / (hi - lo + 1);
+  }
+
+  function computeSpectralFlux(currSpec, prevSpec) {
+    // Weighted multi-band spectral flux: sum of rectified differences
+    let flux = 0;
+    for (const band of SUB_BANDS) {
+      const currE = computeBandEnergy(currSpec, band.lo, band.hi);
+      const prevE = computeBandEnergy(prevSpec, band.lo, band.hi);
+      const diff = currE - prevE;
+      if (diff > 0) {
+        flux += diff * band.weight;
+      }
+    }
+    return flux;
+  }
+
+  function autocorrelateBPM(fluxValues, frameRate) {
+    // fluxValues: array of {flux, time}
+    // Returns {bpm, confidence} or null
+    if (fluxValues.length < 60) return null; // need ~1s of data minimum
+
+    const n = fluxValues.length;
+    const minLag = Math.round(frameRate * 60 / 240); // 240 BPM -> 0.25s
+    const maxLag = Math.round(frameRate * 60 / 30);  // 30 BPM  -> 2s
+
+    if (maxLag >= n) return null;
+
+    // Compute autocorrelation for each lag
+    const acValues = [];
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let ac = 0;
+      let count = 0;
+      for (let i = lag; i < n; i++) {
+        ac += fluxValues[i].flux * fluxValues[i - lag].flux;
+        count++;
+      }
+      acValues.push({ lag, ac: ac / count });
+    }
+
+    // Find peaks in autocorrelation
+    // A peak is a local maximum
+    const peaks = [];
+    for (let i = 1; i < acValues.length - 1; i++) {
+      if (acValues[i].ac > acValues[i - 1].ac && acValues[i].ac > acValues[i + 1].ac) {
+        peaks.push(acValues[i]);
+      }
+    }
+
+    if (peaks.length === 0) return null;
+
+    // Sort by autocorrelation value (highest correlation first)
+    peaks.sort((a, b) => b.ac - a.ac);
+
+    // Take the best peak within reasonable range
+    const best = peaks[0];
+    const bpm = Math.round(frameRate * 60 / best.lag);
+
+    if (bpm < 30 || bpm > 240) return null;
+
+    // Confidence: ratio of best peak to mean AC
+    const meanAC = acValues.reduce((s, v) => s + v.ac, 0) / acValues.length;
+    const confidence = Math.min(1.0, (best.ac / Math.max(0.001, meanAC) - 1) * 2);
+
+    return { bpm, confidence };
+  }
+
+  const TEMPO_UPDATE_INTERVAL = 15; // update tempo estimate every ~15 frames (~250ms)
+
   function micLoop(timestamp) {
     if (!micListening) return;
 
-    // Get BOTH time-domain (for energy) and frequency (for spectral flux)
-    micAnalyser.getByteTimeDomainData(micDataArray);
-    micAnalyser.getFloatTimeDomainData(micFloatArray);
+    micFrameCount++;
 
-    // Calculate RMS energy from float data (more precise: -1..1 range)
-    let sum = 0;
-    for (let i = 0; i < micFloatArray.length; i++) {
-      sum += micFloatArray[i] * micFloatArray[i];
+    // 1. Get current frequency spectrum
+    micAnalyser.getByteFrequencyData(micDataArray);
+
+    // 2. Compute spectral flux (onset detection function)
+    const flux = computeSpectralFlux(micDataArray, micPrevSpectrum);
+
+    // 3. Store in ring buffer (~10 seconds max)
+    const now = timestamp || performance.now();
+    micFluxBuffer.push({ time: now, flux: flux });
+    micFluxCanvasArr.push(flux);
+    // Keep ~10 seconds
+    const cutoff = now - 10000;
+    while (micFluxBuffer.length > 0 && micFluxBuffer[0].time < cutoff) {
+      micFluxBuffer.shift();
     }
-    const rms = Math.sqrt(sum / micFloatArray.length);
+    // Keep canvas array same length
+    while (micFluxCanvasArr.length > micFluxBuffer.length) {
+      micFluxCanvasArr.shift();
+    }
 
-    // Update noise floor estimate (slowly tracks quietest levels)
-    micNoiseFloor = micNoiseFloor * 0.98 + rms * 0.02;
+    // 4. Save current spectrum for next frame's flux calc
+    micPrevSpectrum.set(micDataArray);
 
-    // Adaptive threshold: 3x noise floor, clamped
-    const baseThreshold = Math.max(0.02, micNoiseFloor * 3.5);
-    micAdaptiveThreshold = micAdaptiveThreshold * 0.9 + baseThreshold * 0.1;
-
-    // Update energy bar
-    const energyPct = Math.min(100, (rms / Math.max(0.05, micAdaptiveThreshold)) * 100);
+    // 5. Update energy bar (visual feedback)
+    const totalEnergy = computeBandEnergy(micDataArray, 0, micDataArray.length - 1);
+    const energyPct = Math.min(100, totalEnergy * 200); // scale for visibility
     micEnergyFill.style.width = energyPct + '%';
-    micEnergyLabel.textContent = '阈值: ' + micAdaptiveThreshold.toFixed(3) + ' | 当前: ' + rms.toFixed(4);
 
-    micEnergyHistory.push({ time: timestamp || performance.now(), energy: rms });
-    // Keep last 6 seconds
-    const cutoff = (timestamp || performance.now()) - 6000;
-    micEnergyHistory = micEnergyHistory.filter(e => e.time > cutoff);
-
-    // Onset detection with hysteresis
-    const MIN_INTER_BEAT_MS = 180; // min time between beats (~333 BPM max)
-    const MIN_ONSET_FRAMES = 2;    // energy must stay above threshold for 2 consecutive frames
-
-    if (micEnergyHistory.length >= 3) {
-      const prev2 = micEnergyHistory[micEnergyHistory.length - 3];
-      const prev = micEnergyHistory[micEnergyHistory.length - 2];
-      const curr = micEnergyHistory[micEnergyHistory.length - 1];
-
-      // Rising edge: energy crosses threshold from below
-      const wasBelow = prev2.energy < micAdaptiveThreshold && prev.energy < micAdaptiveThreshold;
-      const isAbove = curr.energy >= micAdaptiveThreshold;
-
-      if (wasBelow && isAbove) {
-        micConsecutiveAboveCount = 1;
-      } else if (isAbove && micConsecutiveAboveCount > 0) {
-        micConsecutiveAboveCount++;
-      } else if (!isAbove) {
-        micConsecutiveAboveCount = 0;
+    // 6. Periodic tempo estimation via autocorrelation
+    if (micFrameCount % TEMPO_UPDATE_INTERVAL === 0 && micFluxBuffer.length >= 60) {
+      // Estimate effective frame rate from timestamps
+      let frameRate = 60;
+      if (micFluxBuffer.length >= 2) {
+        const dt = micFluxBuffer[micFluxBuffer.length - 1].time - micFluxBuffer[0].time;
+        frameRate = (micFluxBuffer.length - 1) / (dt / 1000);
       }
 
-      // Register a beat after sustained energy above threshold
-      if (micConsecutiveAboveCount >= MIN_ONSET_FRAMES) {
-        const onsetTime = prev.time; // use the first frame above threshold
-        if (micPeakTimes.length === 0 ||
-            (onsetTime - micPeakTimes[micPeakTimes.length - 1]) > MIN_INTER_BEAT_MS) {
-          micPeakTimes.push(onsetTime);
-          // Flash energy bar
-          micEnergyFill.style.background = '#ff3750';
-          setTimeout(() => { if (micEnergyFill) micEnergyFill.style.background = ''; }, 80);
-          // Keep last 10 seconds of peaks
-          const peakCutoff = (timestamp || performance.now()) - 10000;
-          micPeakTimes = micPeakTimes.filter(t => t > peakCutoff);
-        }
-        micConsecutiveAboveCount = 0;
+      const result = autocorrelateBPM(micFluxBuffer, frameRate);
+
+      if (result && result.confidence > 0.15) {
+        micTempoBPM = result.bpm;
+        micTempoConf = result.confidence;
+
+        micBpm.textContent = result.bpm;
+        const confPct = Math.round(result.confidence * 100);
+        micConfidence.textContent = '置信度 ' + confPct + '%  ·  点击数字应用此节奏';
+        micEnergyLabel.textContent = '帧率:' + Math.round(frameRate) + 'fps | 通量: ' + flux.toFixed(3);
+
+        micBpm.style.cursor = 'pointer';
+        micBpm.onclick = () => {
+          setBPM(result.bpm);
+          if (!isPlaying) startMetronome();
+        };
       }
     }
 
-    // Calculate BPM from inter-onset intervals
-    if (micPeakTimes.length >= 3) {
-      const intervals = [];
-      for (let i = 1; i < micPeakTimes.length; i++) {
-        intervals.push(micPeakTimes[i] - micPeakTimes[i - 1]);
-      }
-
-      // Filter out outliers: discard intervals > 2x median
-      const sorted = [...intervals].sort((a, b) => a - b);
-      const rawMedian = sorted[Math.floor(sorted.length / 2)];
-
-      const filtered = intervals.filter(iv =>
-        iv >= rawMedian * 0.5 && iv <= rawMedian * 2.0
-      );
-
-      if (filtered.length >= 2) {
-        const filteredSorted = [...filtered].sort((a, b) => a - b);
-        const median = filteredSorted[Math.floor(filteredSorted.length / 2)];
-        const detectedBPM = Math.round(60000 / median);
-
-        if (detectedBPM >= 30 && detectedBPM <= 240) {
-          micBpm.textContent = detectedBPM;
-
-          // Confidence based on interval consistency
-          let sumSqDiff = 0;
-          for (const iv of filtered) {
-            sumSqDiff += (iv - median) * (iv - median);
-          }
-          const stdDev = Math.sqrt(sumSqDiff / filtered.length);
-          const cv = stdDev / median;
-          const conf = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
-
-          micConfidence.textContent = '置信度 ' + conf + '%  ·  点击数字应用此节奏';
-          micBpm.style.cursor = 'pointer';
-
-          micBpm.onclick = () => {
-            setBPM(detectedBPM);
-            if (!isPlaying) startMetronome();
-          };
-        }
-      }
-    }
-
-    // Draw waveform
-    drawMicWaveform();
+    // 7. Draw waveform + flux overlay
+    drawMicComposite(timestamp);
 
     micAnimFrame = requestAnimationFrame(micLoop);
   }
 
-  function drawMicWaveform() {
+  function drawMicComposite(timestamp) {
     if (!micCtx2d) return;
-    const w = micCanvas.width / devicePixelRatio;
-    const h = micCanvas.height / devicePixelRatio;
-
-    micCtx2d.clearRect(0, 0, w, h);
-    micCtx2d.strokeStyle = 'rgba(255,159,10,0.6)';
-    micCtx2d.lineWidth = 1.5;
-    micCtx2d.beginPath();
-
-    const sliceWidth = w / micDataArray.length;
-    let x = 0;
-    for (let i = 0; i < micDataArray.length; i++) {
-      const v = micDataArray[i] / 128.0;
-      const y = (v * h) / 2;
-      if (i === 0) micCtx2d.moveTo(x, y);
-      else micCtx2d.lineTo(x, y);
-      x += sliceWidth;
+    const rect = micCanvas.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    if (w === 0) return;
+    // Resize if needed (handles dpr changes)
+    if (micCanvas.width !== Math.floor(w * devicePixelRatio)) {
+      micCanvas.width = Math.floor(w * devicePixelRatio);
+      micCanvas.height = Math.floor(h * devicePixelRatio);
     }
-    micCtx2d.stroke();
+    const dpr = devicePixelRatio;
 
-    // Threshold line
-    const threshY = (1 - 0.08) * h / 2 + h / 4;
-    micCtx2d.strokeStyle = 'rgba(255,255,255,0.15)';
-    micCtx2d.setLineDash([4, 4]);
-    micCtx2d.beginPath();
-    micCtx2d.moveTo(0, threshY);
-    micCtx2d.lineTo(w, threshY);
-    micCtx2d.stroke();
-    micCtx2d.setLineDash([]);
+    micCtx2d.save();
+    micCtx2d.scale(dpr, dpr);
+    micCtx2d.clearRect(0, 0, w, h);
+
+    // ── Draw frequency spectrum bar chart ──
+    const barW = w / micDataArray.length;
+    const maxBarH = h * 0.5;
+    for (let i = 0; i < micDataArray.length; i++) {
+      const val = micDataArray[i] / 255;
+      const barH = val * maxBarH;
+      // Color gradient based on frequency bin
+      const hue = 200 + (i / micDataArray.length) * 40; // blue -> purple
+      micCtx2d.fillStyle = 'hsla(' + hue + ', 80%, 55%, 0.5)';
+      micCtx2d.fillRect(i * barW, maxBarH - barH, Math.max(1, barW - 0.5), barH);
+    }
+
+    // ── Draw onset detection function (flux) as a line ──
+    if (micFluxCanvasArr.length > 1) {
+      micCtx2d.strokeStyle = 'rgba(255,159,10,0.9)';
+      micCtx2d.lineWidth = 1.5;
+      micCtx2d.shadowColor = 'rgba(255,159,10,0.4)';
+      micCtx2d.shadowBlur = 3;
+      micCtx2d.beginPath();
+
+      const fluxH = h * 0.4;
+      const fluxY = maxBarH + 2;
+      const maxFlux = Math.max(0.001, ...micFluxCanvasArr);
+
+      for (let i = 0; i < micFluxCanvasArr.length; i++) {
+        const x = (i / micFluxCanvasArr.length) * w;
+        const y = fluxY + fluxH - (micFluxCanvasArr[i] / maxFlux) * fluxH;
+        if (i === 0) micCtx2d.moveTo(x, y);
+        else micCtx2d.lineTo(x, y);
+      }
+      micCtx2d.stroke();
+      micCtx2d.shadowBlur = 0;
+
+      // Label: current flux value
+      const lastFlux = micFluxCanvasArr[micFluxCanvasArr.length - 1];
+      micCtx2d.fillStyle = 'rgba(255,255,255,0.5)';
+      micCtx2d.font = '9px -apple-system, sans-serif';
+      micCtx2d.fillText('通量: ' + lastFlux.toFixed(3), 4, h - 4);
+    }
+
+    micCtx2d.restore();
   }
 
   // Handle mic canvas resize
