@@ -68,6 +68,45 @@
     return audioCtx;
   }
 
+  // ─── Tick Sound (for slider detent feel) ──
+  let _tickBuf = null;
+  function getTickBuf() {
+    if (!_tickBuf) {
+      const c = getAudioCtx();
+      const sr = c.sampleRate;
+      const len = Math.floor(sr * 0.05);
+      const buf = c.createBuffer(1, len, sr);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        // Mechanical switch click: sharp attack + ring
+        d[i] = (Math.sin(2*Math.PI*2800*t)*0.7 + Math.sin(2*Math.PI*4200*t)*0.3
+               + (Math.random()*2-1)*0.1) * Math.exp(-t*180);
+      }
+      _tickBuf = buf;
+    }
+    return _tickBuf;
+  }
+
+  let _tickReady = false;
+  async function playTick() {
+    try {
+      const c = getAudioCtx();
+      if (c.state === 'suspended') await c.resume();
+      const src = c.createBufferSource();
+      src.buffer = getTickBuf();
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.5, c.currentTime);
+      src.connect(g); g.connect(c.destination);
+      src.start(c.currentTime);
+      src.stop(c.currentTime + 0.06);
+    } catch(e) {}
+  }
+
+  // Warm up tick buffer on first interaction
+  function warmTick() { getTickBuf(); playTick(); document.removeEventListener('click', warmTick); }
+  document.addEventListener('click', warmTick, { once: true });
+
   // ─── Sound Synthesis ──────────────────
   function createClickBuffer(type) {
     const ctx = getAudioCtx();
@@ -275,8 +314,8 @@
   }
 
   // ─── Event Listeners ──────────────────
-  let sliderLastTick = 0;
-  let sliderLastTickTime = 0;
+  let sliderLastVal = 120;
+  let sliderTickTimer = 0;
   let tickAnimTimer = null;
 
   function flashSliderTick() {
@@ -288,14 +327,12 @@
   bpmSlider.addEventListener('input', () => {
     const val = parseInt(bpmSlider.value);
     setBPM(val);
-    // Tick on every BPM change (debounce 30ms)
-    const now2 = Date.now();
-    if (val !== sliderLastTick && now2 - sliderLastTickTime > 30) {
+    // Tick on each BPM integer change
+    if (val !== sliderLastVal) {
+      sliderLastVal = val;
       playTick();
       flashSliderTick();
-      if (navigator.vibrate) { try { navigator.vibrate(4); } catch(e) {} }
-      sliderLastTick = val;
-      sliderLastTickTime = now2;
+      if (navigator.vibrate) { try { navigator.vibrate(6); } catch(e) {} }
     }
   });
 
@@ -406,7 +443,7 @@
 
       // Gain boost: amplify quiet signals (~6x = +15dB)
       const micGain = micAudioCtx.createGain();
-      micGain.gain.value = 6.0;
+      micGain.gain.value = 15.0;
 
       // Analyser: FFT for spectral flux, ZERO smoothing for raw transients
       micAnalyser = micAudioCtx.createAnalyser();
@@ -414,7 +451,13 @@
       micAnalyser.smoothingTimeConstant = 0;
       micAnalyser.minDecibels = -100;
       micAnalyser.maxDecibels = 0;
-      micSource.connect(micGain);
+      // Bandpass to isolate percussion frequencies (150-5000Hz)
+      const micBP = micAudioCtx.createBiquadFilter();
+      micBP.type = 'bandpass';
+      micBP.frequency.value = 1500;
+      micBP.Q.value = 0.6;
+      micSource.connect(micBP);
+      micBP.connect(micGain);
       micGain.connect(micAnalyser);
       micGainNode = micGain;
 
@@ -604,9 +647,9 @@
       for (let i = 0; i < micDataArray.length; i++) {
         if (micDataArray[i] > maxBin) maxBin = micDataArray[i];
       }
-      if (maxBin < 40) {
-        micGainNode.gain.value = Math.min(20, micGainNode.gain.value * 1.3);
-      } else if (maxBin > 230) {
+      if (maxBin < 30) {
+        micGainNode.gain.value = Math.min(30, micGainNode.gain.value * 1.5);
+      } else if (maxBin > 220) {
         micGainNode.gain.value = Math.max(1, micGainNode.gain.value * 0.8);
       }
     }
@@ -633,8 +676,15 @@
 
     // 5. Update energy bar (visual feedback)
     const totalEnergy = computeBandEnergy(micDataArray, 0, micDataArray.length - 1);
-    const energyPct = Math.min(100, totalEnergy * 200); // scale for visibility
+    const energyPct = Math.min(100, totalEnergy * 200);
     micEnergyFill.style.width = energyPct + '%';
+    // Show peak and gain for diagnostics
+    let peakBin = 0;
+    for (let i = 0; i < micDataArray.length; i++) {
+      if (micDataArray[i] > peakBin) peakBin = micDataArray[i];
+    }
+    const gainDb = micGainNode ? Math.round(20 * Math.log10(micGainNode.gain.value)) : 0;
+    micEnergyLabel.textContent = '峰值:' + peakBin + ' | 增益:+' + gainDb + 'dB | 通量:' + flux.toFixed(3);
 
     // 6. Periodic tempo estimation via autocorrelation
     if (micFrameCount % TEMPO_UPDATE_INTERVAL === 0 && micFluxBuffer.length >= 60) {
