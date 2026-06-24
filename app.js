@@ -275,14 +275,27 @@
   }
 
   // ─── Event Listeners ──────────────────
-  let sliderDebounce = 0;
+  let sliderLastTick = 0;
+  let sliderLastTickTime = 0;
+  let tickAnimTimer = null;
+
+  function flashSliderTick() {
+    bpmSlider.classList.add('ticking');
+    clearTimeout(tickAnimTimer);
+    tickAnimTimer = setTimeout(() => bpmSlider.classList.remove('ticking'), 80);
+  }
+
   bpmSlider.addEventListener('input', () => {
     const val = parseInt(bpmSlider.value);
     setBPM(val);
-    // Haptic + tick on every ~4 BPM change to avoid overload
-    if (Math.abs(val - sliderDebounce) >= 4) {
-      hapticPulse();
-      sliderDebounce = val;
+    // Tick on every BPM change (debounce 30ms)
+    const now2 = Date.now();
+    if (val !== sliderLastTick && now2 - sliderLastTickTime > 30) {
+      playTick();
+      flashSliderTick();
+      if (navigator.vibrate) { try { navigator.vibrate(4); } catch(e) {} }
+      sliderLastTick = val;
+      sliderLastTickTime = now2;
     }
   });
 
@@ -391,13 +404,19 @@
       if (micAudioCtx.state === 'suspended') await micAudioCtx.resume();
       micSource = micAudioCtx.createMediaStreamSource(micStream);
 
+      // Gain boost: amplify quiet signals (~6x = +15dB)
+      const micGain = micAudioCtx.createGain();
+      micGain.gain.value = 6.0;
+
       // Analyser: FFT for spectral flux, ZERO smoothing for raw transients
       micAnalyser = micAudioCtx.createAnalyser();
       micAnalyser.fftSize = 1024;     // 512 frequency bins
       micAnalyser.smoothingTimeConstant = 0;
       micAnalyser.minDecibels = -100;
       micAnalyser.maxDecibels = 0;
-      micSource.connect(micAnalyser);
+      micSource.connect(micGain);
+      micGain.connect(micAnalyser);
+      micGainNode = micGain;
 
       micDataArray = new Uint8Array(micAnalyser.frequencyBinCount); // 512 bins
       micPrevSpectrum = new Uint8Array(micAnalyser.frequencyBinCount);
@@ -578,6 +597,19 @@
 
     // 1. Get current frequency spectrum
     micAnalyser.getByteFrequencyData(micDataArray);
+
+    // Auto-gain: if signal is too quiet, boost more; if clipping, back off
+    if (micGainNode && micFrameCount % 30 === 0) {
+      let maxBin = 0;
+      for (let i = 0; i < micDataArray.length; i++) {
+        if (micDataArray[i] > maxBin) maxBin = micDataArray[i];
+      }
+      if (maxBin < 40) {
+        micGainNode.gain.value = Math.min(20, micGainNode.gain.value * 1.3);
+      } else if (maxBin > 230) {
+        micGainNode.gain.value = Math.max(1, micGainNode.gain.value * 0.8);
+      }
+    }
 
     // 2. Compute spectral flux (onset detection function)
     const flux = computeSpectralFlux(micDataArray, micPrevSpectrum);

@@ -541,3 +541,18 @@ body {
   background: #2c2c2e;
   color: var(--text);
 }
+
+/* ===== Slider Tick Animation ===== */
+.bpm-slider::-webkit-slider-thumb {
+  transition: transform 0.08s ease;
+}
+
+.bpm-slider.ticking::-webkit-slider-thumb {
+  transform: scale(1.25);
+  box-shadow: 0 0 20px var(--accent);
+}
+
+/* ===== Volume Slider Tick ===== */
+.volume-slider::-webkit-slider-thumb {
+  transition: transform 0.08s ease;
+}
