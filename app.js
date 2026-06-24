@@ -418,8 +418,12 @@
     micSource = null;
     micAnalyser = null;
     micDataArray = null;
+    micFloatArray = null;
     micEnergyHistory = [];
     micPeakTimes = [];
+    micNoiseFloor = 0.01;
+    micAdaptiveThreshold = 0.08;
+    micConsecutiveAboveCount = 0;
     if (micAnimFrame) cancelAnimationFrame(micAnimFrame);
     micBtn.textContent = '开始监听';
     micBtn.classList.remove('listening');
@@ -434,38 +438,72 @@
     if (micCtx2d) micCtx2d.scale(devicePixelRatio, devicePixelRatio);
   }
 
-  function micLoop() {
+  function micLoop(timestamp) {
     if (!micListening) return;
 
+    // Get BOTH time-domain (for energy) and frequency (for spectral flux)
     micAnalyser.getByteTimeDomainData(micDataArray);
+    micAnalyser.getFloatTimeDomainData(micFloatArray);
 
-    // Calculate RMS energy
+    // Calculate RMS energy from float data (more precise: -1..1 range)
     let sum = 0;
-    for (let i = 0; i < micDataArray.length; i++) {
-      const val = (micDataArray[i] - 128) / 128;
-      sum += val * val;
+    for (let i = 0; i < micFloatArray.length; i++) {
+      sum += micFloatArray[i] * micFloatArray[i];
     }
-    const rms = Math.sqrt(sum / micDataArray.length);
+    const rms = Math.sqrt(sum / micFloatArray.length);
 
-    micEnergyHistory.push({ time: performance.now(), energy: rms });
-    // Keep last 5 seconds
-    const cutoff = performance.now() - 5000;
+    // Update noise floor estimate (slowly tracks quietest levels)
+    micNoiseFloor = micNoiseFloor * 0.98 + rms * 0.02;
+
+    // Adaptive threshold: 3x noise floor, clamped
+    const baseThreshold = Math.max(0.02, micNoiseFloor * 3.5);
+    micAdaptiveThreshold = micAdaptiveThreshold * 0.9 + baseThreshold * 0.1;
+
+    // Update energy bar
+    const energyPct = Math.min(100, (rms / Math.max(0.05, micAdaptiveThreshold)) * 100);
+    micEnergyFill.style.width = energyPct + '%';
+    micEnergyLabel.textContent = '阈值: ' + micAdaptiveThreshold.toFixed(3) + ' | 当前: ' + rms.toFixed(4);
+
+    micEnergyHistory.push({ time: timestamp || performance.now(), energy: rms });
+    // Keep last 6 seconds
+    const cutoff = (timestamp || performance.now()) - 6000;
     micEnergyHistory = micEnergyHistory.filter(e => e.time > cutoff);
 
-    // Onset detection: simple threshold crossing
-    const ONSET_THRESHOLD = 0.08;
-    const MIN_INTER_BEAT_MS = 200; // min time between beats (300 BPM max)
+    // Onset detection with hysteresis
+    const MIN_INTER_BEAT_MS = 180; // min time between beats (~333 BPM max)
+    const MIN_ONSET_FRAMES = 2;    // energy must stay above threshold for 2 consecutive frames
 
-    if (micEnergyHistory.length >= 2) {
+    if (micEnergyHistory.length >= 3) {
+      const prev2 = micEnergyHistory[micEnergyHistory.length - 3];
       const prev = micEnergyHistory[micEnergyHistory.length - 2];
       const curr = micEnergyHistory[micEnergyHistory.length - 1];
-      if (prev.energy < ONSET_THRESHOLD && curr.energy >= ONSET_THRESHOLD) {
-        if (micPeakTimes.length === 0 || (curr.time - micPeakTimes[micPeakTimes.length - 1]) > MIN_INTER_BEAT_MS) {
-          micPeakTimes.push(curr.time);
-          // Keep last ~8 seconds of peaks
-          const peakCutoff = performance.now() - 8000;
+
+      // Rising edge: energy crosses threshold from below
+      const wasBelow = prev2.energy < micAdaptiveThreshold && prev.energy < micAdaptiveThreshold;
+      const isAbove = curr.energy >= micAdaptiveThreshold;
+
+      if (wasBelow && isAbove) {
+        micConsecutiveAboveCount = 1;
+      } else if (isAbove && micConsecutiveAboveCount > 0) {
+        micConsecutiveAboveCount++;
+      } else if (!isAbove) {
+        micConsecutiveAboveCount = 0;
+      }
+
+      // Register a beat after sustained energy above threshold
+      if (micConsecutiveAboveCount >= MIN_ONSET_FRAMES) {
+        const onsetTime = prev.time; // use the first frame above threshold
+        if (micPeakTimes.length === 0 ||
+            (onsetTime - micPeakTimes[micPeakTimes.length - 1]) > MIN_INTER_BEAT_MS) {
+          micPeakTimes.push(onsetTime);
+          // Flash energy bar
+          micEnergyFill.style.background = '#ff3750';
+          setTimeout(() => { if (micEnergyFill) micEnergyFill.style.background = ''; }, 80);
+          // Keep last 10 seconds of peaks
+          const peakCutoff = (timestamp || performance.now()) - 10000;
           micPeakTimes = micPeakTimes.filter(t => t > peakCutoff);
         }
+        micConsecutiveAboveCount = 0;
       }
     }
 
@@ -476,31 +514,39 @@
         intervals.push(micPeakTimes[i] - micPeakTimes[i - 1]);
       }
 
-      // Median interval (robust to outliers)
+      // Filter out outliers: discard intervals > 2x median
       const sorted = [...intervals].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
-      const detectedBPM = Math.round(60000 / median);
+      const rawMedian = sorted[Math.floor(sorted.length / 2)];
 
-      if (detectedBPM >= 30 && detectedBPM <= 240) {
-        micBpm.textContent = detectedBPM;
+      const filtered = intervals.filter(iv =>
+        iv >= rawMedian * 0.5 && iv <= rawMedian * 2.0
+      );
 
-        // Confidence based on interval consistency
-        let sumSqDiff = 0;
-        for (const iv of intervals) {
-          sumSqDiff += (iv - median) * (iv - median);
+      if (filtered.length >= 2) {
+        const filteredSorted = [...filtered].sort((a, b) => a - b);
+        const median = filteredSorted[Math.floor(filteredSorted.length / 2)];
+        const detectedBPM = Math.round(60000 / median);
+
+        if (detectedBPM >= 30 && detectedBPM <= 240) {
+          micBpm.textContent = detectedBPM;
+
+          // Confidence based on interval consistency
+          let sumSqDiff = 0;
+          for (const iv of filtered) {
+            sumSqDiff += (iv - median) * (iv - median);
+          }
+          const stdDev = Math.sqrt(sumSqDiff / filtered.length);
+          const cv = stdDev / median;
+          const conf = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
+
+          micConfidence.textContent = '置信度 ' + conf + '%  ·  点击数字应用此节奏';
+          micBpm.style.cursor = 'pointer';
+
+          micBpm.onclick = () => {
+            setBPM(detectedBPM);
+            if (!isPlaying) startMetronome();
+          };
         }
-        const stdDev = Math.sqrt(sumSqDiff / intervals.length);
-        const cv = stdDev / median; // coefficient of variation
-        const conf = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
-
-        micConfidence.textContent = `置信度 ${conf}%  ·  点击数字应用此节奏`;
-        micBpm.style.cursor = 'pointer';
-
-        // Click to apply
-        micBpm.onclick = () => {
-          setBPM(detectedBPM);
-          if (!isPlaying) startMetronome();
-        };
       }
     }
 
@@ -562,6 +608,16 @@
       setBPM(Math.max(30, bpm - 1));
     }
   });
+
+  // ─── Audio Output Selection ──────────
+  outputSelect.addEventListener('change', () => {
+    setAudioSink(outputSelect.value);
+  });
+
+  // Populate output devices on first user interaction
+  document.addEventListener('click', function initDevices() {
+    populateOutputDevices();
+  }, { once: true });
 
   // ─── PWA Service Worker ───────────────
   if ('serviceWorker' in navigator) {
