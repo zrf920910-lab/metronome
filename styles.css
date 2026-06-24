@@ -106,58 +106,80 @@ body {
   opacity: 0.7;
 }
 
-/* ===== Dial ===== */
-.dial-container {
+/* ===== Pendulum ===== */
+.pendulum-container {
   width: 100%;
-  padding: 12px 20px 8px;
+  padding: 8px 20px 4px;
+  position: relative;
 }
 
-.dial-ring {
+.pendulum-stage {
   position: relative;
-  width: 180px;
-  height: 180px;
+  width: 100%;
+  height: 220px;
+  overflow: hidden;
+}
+
+.pendulum-pivot {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.3);
+  border: 2px solid rgba(255,255,255,0.5);
+  z-index: 3;
+}
+
+.pendulum-arm {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform-origin: top center;
+  transform: rotate(0deg);
+  width: 4px;
+  z-index: 2;
+}
+
+.pendulum-rod {
+  width: 4px;
+  height: 160px;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.6), rgba(255,255,255,0.2));
+  border-radius: 2px;
   margin: 0 auto;
 }
 
-.dial-svg {
-  width: 100%;
-  height: 100%;
-}
-
-.dial-track {
-  fill: none;
-  stroke: rgba(255,255,255,0.1);
-  stroke-width: 8;
-}
-
-.dial-progress {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 8;
-  stroke-linecap: round;
-  transition: stroke-dashoffset 0.2s ease;
-}
-
-.dial-knob {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.1);
-  border: 2px solid rgba(255,255,255,0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.dial-knob-inner {
-  width: 12px;
-  height: 12px;
+.pendulum-weight {
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 20px var(--accent-dim), 0 4px 12px rgba(0,0,0,0.4);
+  margin: -2px auto 0;
+  transition: box-shadow 0.08s;
+}
+
+.pendulum-weight.beat-hit {
+  box-shadow: 0 0 32px var(--accent), 0 0 60px var(--accent-dim), 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.pendulum-scale {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 14px;
+  z-index: 1;
+}
+
+.scale-mark {
+  width: 2px;
+  height: 10px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 1px;
 }
 
 .bpm-slider {
@@ -411,60 +433,6 @@ body {
   color: var(--text-secondary);
 }
 
-/* ===== Mic Section ===== */
-.mic-section {
-  width: 100%;
-  padding: 16px;
-}
-
-.mic-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.mic-label {
-  font-size: 14px;
-}
-
-.mic-btn {
-  padding: 8px 16px;
-  border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(255,255,255,0.06);
-  color: var(--text);
-  font-size: 13px;
-  font-family: var(--font);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.mic-btn.listening {
-  background: rgba(255,69,58,0.3);
-  border-color: rgba(255,69,58,0.5);
-}
-
-.mic-bpm {
-  font-size: 36px;
-  font-weight: 200;
-  text-align: center;
-}
-
-.mic-confidence {
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: center;
-  margin-top: 2px;
-}
-
-.mic-visualizer {
-  width: 100%;
-  height: 72px;
-  margin-top: 10px;
-  border-radius: 6px;
-  background: rgba(0,0,0,0.3);
-}
 
 /* ===== Responsive ===== */
 @media (max-width: 380px) {
@@ -542,17 +510,3 @@ body {
   color: var(--text);
 }
 
-/* ===== Slider Tick Animation ===== */
-.bpm-slider::-webkit-slider-thumb {
-  transition: transform 0.08s ease;
-}
-
-.bpm-slider.ticking::-webkit-slider-thumb {
-  transform: scale(1.25);
-  box-shadow: 0 0 20px var(--accent);
-}
-
-/* ===== Volume Slider Tick ===== */
-.volume-slider::-webkit-slider-thumb {
-  transition: transform 0.08s ease;
-}

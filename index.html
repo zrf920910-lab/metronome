@@ -28,16 +28,18 @@
     </div>
 
     <!-- Tempo Dial / Slider -->
-    <div class="dial-container glass-card">
-      <div class="dial-ring">
-        <svg viewBox="0 0 200 200" class="dial-svg">
-          <circle cx="100" cy="100" r="88" class="dial-track" />
-          <circle cx="100" cy="100" r="88" class="dial-progress" id="dialProgress"
-            stroke-dasharray="553" stroke-dashoffset="0"
-            transform="rotate(-90 100 100)" />
-        </svg>
-        <div class="dial-knob" id="dialKnob">
-          <div class="dial-knob-inner"></div>
+    <!-- Pendulum -->
+    <div class="pendulum-container glass-card">
+      <div class="pendulum-stage">
+        <div class="pendulum-pivot"></div>
+        <div class="pendulum-arm" id="pendulumArm">
+          <div class="pendulum-rod"></div>
+          <div class="pendulum-weight" id="pendulumWeight"></div>
+        </div>
+        <div class="pendulum-scale">
+          <span class="scale-mark"></span><span class="scale-mark"></span><span class="scale-mark"></span>
+          <span class="scale-mark"></span><span class="scale-mark"></span><span class="scale-mark"></span>
+          <span class="scale-mark"></span>
         </div>
       </div>
       <input type="range" class="bpm-slider" id="bpmSlider" min="30" max="240" value="120" />
@@ -113,28 +115,7 @@
       <div class="tap-count" id="tapCount">轻触跟随节奏</div>
     </div>
 
-    <!-- Mic BPM Detection -->
-    <div class="mic-section glass-card">
-      <div class="mic-header">
-        <span class="mic-label">🎤 实时节奏检测</span>
-        <button class="mic-btn" id="micBtn">开始监听</button>
-      </div>
-      <div class="mic-bpm" id="micBpm">—</div>
-      <div class="mic-confidence" id="micConfidence"></div>
-      <canvas class="mic-visualizer" id="micCanvas"></canvas>
-      <div class="mic-energy-bar" id="micEnergyBar"><div class="mic-energy-fill" id="micEnergyFill"></div></div>
-      <div class="mic-energy-label" id="micEnergyLabel"></div>
-    </div>
 
-    <!-- Audio Output -->
-    <div class="output-section glass-card">
-      <div class="output-header">
-        <span class="output-label">🔊 音频输出</span>
-        <select class="output-select" id="outputSelect">
-          <option value="default">系统默认</option>
-        </select>
-      </div>
-    </div>
   </div>
 
   <script src="/app.js"></script>
