@@ -275,8 +275,15 @@
   }
 
   // ─── Event Listeners ──────────────────
+  let sliderDebounce = 0;
   bpmSlider.addEventListener('input', () => {
-    setBPM(parseInt(bpmSlider.value));
+    const val = parseInt(bpmSlider.value);
+    setBPM(val);
+    // Haptic + tick on every ~4 BPM change to avoid overload
+    if (Math.abs(val - sliderDebounce) >= 4) {
+      hapticPulse();
+      sliderDebounce = val;
+    }
   });
 
   playBtn.addEventListener('click', togglePlay);
@@ -372,36 +379,56 @@
   async function startMic() {
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false }
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: { ideal: 44100 }
+        }
       });
 
       micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (micAudioCtx.state === 'suspended') await micAudioCtx.resume();
       micSource = micAudioCtx.createMediaStreamSource(micStream);
 
-      // Analyser for energy / onset detection
+      // Analyser: FFT for spectral flux, ZERO smoothing for raw transients
       micAnalyser = micAudioCtx.createAnalyser();
-      micAnalyser.fftSize = 2048;
-      micAnalyser.smoothingTimeConstant = 0.3;
+      micAnalyser.fftSize = 1024;     // 512 frequency bins
+      micAnalyser.smoothingTimeConstant = 0;
+      micAnalyser.minDecibels = -100;
+      micAnalyser.maxDecibels = 0;
       micSource.connect(micAnalyser);
 
-      micDataArray = new Uint8Array(micAnalyser.frequencyBinCount);
+      micDataArray = new Uint8Array(micAnalyser.frequencyBinCount); // 512 bins
+      micPrevSpectrum = new Uint8Array(micAnalyser.frequencyBinCount);
+      micPrevSpectrum.fill(0);
+      micFluxBuffer = [];
+      micFluxCanvasArr = [];
+      micTempoBPM = null;
+      micTempoConf = 0;
+      micFrameCount = 0;
       micEnergyHistory = [];
       micPeakTimes = [];
 
-      // Mic canvas
+      // Mic canvas — get context fresh each time
       micCtx2d = micCanvas.getContext('2d');
-      resizeMicCanvas();
 
       micListening = true;
       micBtn.textContent = '停止监听';
       micBtn.classList.add('listening');
       micBpm.textContent = '—';
-      micConfidence.textContent = '正在分析...';
+      micConfidence.textContent = '正在分析频谱...';
+      micEnergyLabel.textContent = '';
+      micEnergyFill.style.width = '0%';
+
+      // Prime: get first spectrum so prev is valid
+      await new Promise(r => setTimeout(r, 50));
+      micAnalyser.getByteFrequencyData(micPrevSpectrum);
 
       requestAnimationFrame(micLoop);
     } catch (err) {
       console.error('Mic error:', err);
-      micConfidence.textContent = '无法访问麦克风';
+      micConfidence.textContent = '麦克风未授权或不可用';
     }
   }
 
@@ -412,7 +439,7 @@
       micStream = null;
     }
     if (micAudioCtx) {
-      micAudioCtx.close();
+      micAudioCtx.close().catch(() => {});
       micAudioCtx = null;
     }
     micSource = null;
@@ -436,13 +463,18 @@
   }
 
   function resizeMicCanvas() {
+    if (!micCanvas || !micCtx2d) return;
+    const dpr = window.devicePixelRatio || 1;
     const rect = micCanvas.getBoundingClientRect();
-    micCanvas.width = rect.width * devicePixelRatio;
-    micCanvas.height = rect.height * devicePixelRatio;
-    if (micCtx2d) micCtx2d.scale(devicePixelRatio, devicePixelRatio);
+    const w = Math.max(1, Math.floor(rect.width));
+    const h = Math.max(1, Math.floor(rect.height));
+    if (micCanvas.width !== w * dpr || micCanvas.height !== h * dpr) {
+      micCanvas.width = w * dpr;
+      micCanvas.height = h * dpr;
+    }
   }
 
-  //
+
   // SPECTRAL FLUX ONSET DETECTION + AUTOCORRELATION TEMPO ESTIMATION
   // Based on standard MIR beat-tracking pipeline:
   //   1. Compute spectral flux (onset detection function)
@@ -607,20 +639,13 @@
   }
 
   function drawMicComposite(timestamp) {
-    if (!micCtx2d) return;
-    const rect = micCanvas.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-    if (w === 0) return;
-    // Resize if needed (handles dpr changes)
-    if (micCanvas.width !== Math.floor(w * devicePixelRatio)) {
-      micCanvas.width = Math.floor(w * devicePixelRatio);
-      micCanvas.height = Math.floor(h * devicePixelRatio);
-    }
-    const dpr = devicePixelRatio;
+    if (!micCtx2d || !micCanvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = micCanvas.width / dpr;
+    const h = micCanvas.height / dpr;
+    if (w <= 1 || h <= 1) return;
 
-    micCtx2d.save();
-    micCtx2d.scale(dpr, dpr);
+    micCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     micCtx2d.clearRect(0, 0, w, h);
 
     // ── Draw frequency spectrum bar chart ──
@@ -663,7 +688,7 @@
       micCtx2d.fillText('通量: ' + lastFlux.toFixed(3), 4, h - 4);
     }
 
-    micCtx2d.restore();
+
   }
 
   // Handle mic canvas resize
