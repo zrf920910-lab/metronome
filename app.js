@@ -10,6 +10,12 @@
   const bpmSlider   = document.getElementById('bpmSlider');
   const pendulumArm  = document.getElementById('pendulumArm');
   const pendulumWeight=document.getElementById('pendulumWeight');
+  const micBtn      = document.getElementById('micBtn');
+  const micBpm      = document.getElementById('micBpm');
+  const micConfidence = document.getElementById('micConfidence');
+  const micCanvas   = document.getElementById('micCanvas');
+  const micEnergyFill= document.getElementById('micEnergyFill');
+  const micEnergyLabel=document.getElementById('micEnergyLabel');
   const playBtn     = document.getElementById('playBtn');
   const playIcon    = document.getElementById('playIcon');
   const pauseIcon   = document.getElementById('pauseIcon');
@@ -50,7 +56,19 @@
   const TAP_MIN_COUNT = 3;
 
   // Mic state
+  let micStream = null;
+  let micAudioCtx = null;
+  let micAnalyser = null;
+  let micSource = null;
+  let micGainNode = null;
+  let micListening = false;
   let micDataArray = null;
+  let micPrevSpectrum = null;
+  let micFluxBuffer = [];
+  let micFluxCanvasArr = [];
+  let micFrameCount = 0;
+  let micAnimFrame = null;
+  let micCtx2d = null;
 
   // ─── Audio Engine ──────────────────────
   let audioCtx = null;
@@ -492,6 +510,216 @@
     // Start pendulum loop if not running
     if (!pendulumAnimFrame) {
       pendulumAnimFrame = requestAnimationFrame(pendulumLoop);
+    }
+  }
+
+  // ─── Mic BPM Detection ─────────────────
+
+  micBtn.addEventListener('click', async () => {
+    if (micListening) { stopMic(); } else { await startMic(); }
+  });
+
+  async function startMic() {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (micAudioCtx.state === 'suspended') await micAudioCtx.resume();
+      micSource = micAudioCtx.createMediaStreamSource(micStream);
+
+      // Bandpass 150-5000Hz to isolate percussion
+      const bp = micAudioCtx.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = 1500; bp.Q.value = 0.6;
+
+      // Auto-gain starting at 15x
+      const gain = micAudioCtx.createGain();
+      gain.gain.value = 15.0;
+      micGainNode = gain;
+
+      micAnalyser = micAudioCtx.createAnalyser();
+      micAnalyser.fftSize = 1024;
+      micAnalyser.smoothingTimeConstant = 0;
+      micAnalyser.minDecibels = -100;
+      micAnalyser.maxDecibels = 0;
+
+      micSource.connect(bp); bp.connect(gain); gain.connect(micAnalyser);
+
+      micDataArray = new Uint8Array(micAnalyser.frequencyBinCount);
+      micPrevSpectrum = new Uint8Array(micAnalyser.frequencyBinCount);
+      micPrevSpectrum.fill(0);
+      micFluxBuffer = []; micFluxCanvasArr = []; micFrameCount = 0;
+      micCtx2d = micCanvas.getContext('2d');
+
+      micListening = true;
+      micBtn.textContent = '停止监听';
+      micBtn.classList.add('listening');
+      micBpm.textContent = '—';
+      micConfidence.textContent = '正在分析频谱...';
+      micEnergyLabel.textContent = '';
+      micEnergyFill.style.width = '0%';
+
+      await new Promise(r => setTimeout(r, 80));
+      micAnalyser.getByteFrequencyData(micPrevSpectrum);
+      requestAnimationFrame(micLoop);
+    } catch (e) {
+      console.error('Mic:', e);
+      micConfidence.textContent = '麦克风未授权或不可用';
+    }
+  }
+
+  function stopMic() {
+    micListening = false;
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (micAudioCtx) { micAudioCtx.close().catch(()=>{}); micAudioCtx = null; }
+    micSource = null; micAnalyser = null; micGainNode = null;
+    micDataArray = null; micPrevSpectrum = null;
+    micFluxBuffer = []; micFluxCanvasArr = []; micFrameCount = 0;
+    if (micAnimFrame) cancelAnimationFrame(micAnimFrame);
+    micBtn.textContent = '开始监听';
+    micBtn.classList.remove('listening');
+    micBpm.textContent = '—';
+    micConfidence.textContent = '';
+    micEnergyLabel.textContent = '';
+    micEnergyFill.style.width = '0%';
+  }
+
+  // Sub-band definitions for spectral flux (sr~44100, fftSize=1024 → 512 bins, ~43Hz/bin)
+  const SUB_BANDS = [
+    { lo:0,  hi:2,   w:0.8 },  // 0-130Hz kick
+    { lo:3,  hi:7,   w:1.0 },  // 130-345Hz snare body
+    { lo:8,  hi:25,  w:1.2 },  // 345-1100Hz toms
+    { lo:26, hi:100, w:1.5 },  // 1100-4300Hz hihats
+    { lo:101,hi:200, w:1.3 },  // 4300-8600Hz crisp
+  ];
+
+  function bandEnergy(spec, lo, hi) {
+    let e = 0;
+    for (let i = lo; i <= hi && i < spec.length; i++) e += spec[i] / 255;
+    return e / (hi - lo + 1);
+  }
+
+  function spectralFlux(curr, prev) {
+    let f = 0;
+    for (const b of SUB_BANDS) {
+      const d = bandEnergy(curr, b.lo, b.hi) - bandEnergy(prev, b.lo, b.hi);
+      if (d > 0) f += d * b.w;
+    }
+    return f;
+  }
+
+  function tempoAC(fluxArr, fps) {
+    if (fluxArr.length < 60) return null; // need ~1s
+    const n = fluxArr.length;
+    const lagLo = Math.round(fps * 60 / 240);
+    const lagHi = Math.round(fps * 60 / 30);
+    if (lagHi >= n) return null;
+    const acVals = [];
+    for (let lag = lagLo; lag <= lagHi; lag++) {
+      let ac = 0;
+      for (let i = lag; i < n; i++) ac += fluxArr[i].f * fluxArr[i - lag].f;
+      acVals.push({ lag, ac: ac / (n - lag) });
+    }
+    const peaks = [];
+    for (let i = 1; i < acVals.length - 1; i++) {
+      if (acVals[i].ac > acVals[i-1].ac && acVals[i].ac > acVals[i+1].ac) peaks.push(acVals[i]);
+    }
+    if (!peaks.length) return null;
+    peaks.sort((a, b) => b.ac - a.ac);
+    const best = peaks[0];
+    const bpm = Math.round(fps * 60 / best.lag);
+    if (bpm < 30 || bpm > 240) return null;
+    const mean = acVals.reduce((s, v) => s + v.ac, 0) / acVals.length;
+    const conf = Math.min(1, (best.ac / Math.max(0.001, mean) - 1) * 2);
+    return { bpm, confidence: conf };
+  }
+
+  const TEMPO_TICK = 12; // update ~5/sec
+
+  function micLoop(ts) {
+    if (!micListening) return;
+    micFrameCount++;
+    micAnalyser.getByteFrequencyData(micDataArray);
+
+    const flux = spectralFlux(micDataArray, micPrevSpectrum);
+    const now = ts || performance.now();
+    micFluxBuffer.push({ t: now, f: flux });
+    micFluxCanvasArr.push(flux);
+    while (micFluxBuffer.length && micFluxBuffer[0].t < now - 10000) micFluxBuffer.shift();
+    while (micFluxCanvasArr.length > micFluxBuffer.length) micFluxCanvasArr.shift();
+    micPrevSpectrum.set(micDataArray);
+
+    // Energy bar
+    const e = bandEnergy(micDataArray, 0, micDataArray.length - 1);
+    micEnergyFill.style.width = Math.min(100, e * 200) + '%';
+
+    // Auto-gain every 30 frames
+    if (micGainNode && micFrameCount % 30 === 0) {
+      let peak = 0;
+      for (let i = 0; i < micDataArray.length; i++) if (micDataArray[i] > peak) peak = micDataArray[i];
+      if (peak < 30) micGainNode.gain.value = Math.min(30, micGainNode.gain.value * 1.5);
+      else if (peak > 220) micGainNode.gain.value = Math.max(1, micGainNode.gain.value * 0.8);
+      const db = Math.round(20 * Math.log10(micGainNode.gain.value));
+      micEnergyLabel.textContent = '峰值:' + peak + ' | +' + db + 'dB | 通量:' + flux.toFixed(3);
+    }
+
+    // Tempo estimation
+    if (micFrameCount % TEMPO_TICK === 0 && micFluxBuffer.length >= 60) {
+      let fps = 60;
+      if (micFluxBuffer.length >= 2) {
+        fps = (micFluxBuffer.length - 1) / ((micFluxBuffer[micFluxBuffer.length-1].t - micFluxBuffer[0].t) / 1000);
+      }
+      const r = tempoAC(micFluxBuffer, fps);
+      if (r && r.confidence > 0.15) {
+        micBpm.textContent = r.bpm;
+        micConfidence.textContent = '置信度 ' + Math.round(r.confidence*100) + '% · 点击应用';
+        micBpm.style.cursor = 'pointer';
+        micBpm.onclick = () => { setBPM(r.bpm); if (!isPlaying) startMetronome(); };
+      }
+    }
+
+    drawMicView(ts);
+    micAnimFrame = requestAnimationFrame(micLoop);
+  }
+
+  function drawMicView(ts) {
+    if (!micCtx2d || !micCanvas) return;
+    const dpr = devicePixelRatio || 1;
+    const rect = micCanvas.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(rect.width));
+    const h = Math.max(1, Math.floor(rect.height));
+    if (micCanvas.width !== w * dpr || micCanvas.height !== h * dpr) {
+      micCanvas.width = w * dpr; micCanvas.height = h * dpr;
+    }
+    micCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+    micCtx2d.clearRect(0, 0, w, h);
+
+    // Spectrum bars
+    const bw = w / micDataArray.length;
+    const mh = h * 0.5;
+    for (let i = 0; i < micDataArray.length; i++) {
+      const v = micDataArray[i] / 255;
+      const bh = v * mh;
+      micCtx2d.fillStyle = 'hsla(' + (200 + i/micDataArray.length*40) + ',80%,55%,0.5)';
+      micCtx2d.fillRect(i * bw, mh - bh, Math.max(1, bw - 0.5), bh);
+    }
+
+    // Flux line
+    if (micFluxCanvasArr.length > 1) {
+      micCtx2d.strokeStyle = 'rgba(255,159,10,0.9)';
+      micCtx2d.lineWidth = 1.5;
+      micCtx2d.shadowColor = 'rgba(255,159,10,0.4)';
+      micCtx2d.shadowBlur = 3;
+      micCtx2d.beginPath();
+      const fh = h * 0.35, fy = mh + 2;
+      const maxF = Math.max(0.001, ...micFluxCanvasArr);
+      for (let i = 0; i < micFluxCanvasArr.length; i++) {
+        const x = (i / micFluxCanvasArr.length) * w;
+        const y = fy + fh - (micFluxCanvasArr[i] / maxF) * fh;
+        i === 0 ? micCtx2d.moveTo(x, y) : micCtx2d.lineTo(x, y);
+      }
+      micCtx2d.stroke();
+      micCtx2d.shadowBlur = 0;
     }
   }
 
