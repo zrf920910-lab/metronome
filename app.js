@@ -513,6 +513,87 @@
     }
   }
 
+  // ─── Tempo Consensus Tracker ────────────
+  // Uses histogram voting: each autocorrelation result "votes" for
+  // a BPM. The peak of the histogram over the last 12 seconds is
+  // the true tempo. Only displays when consensus is strong.
+
+  const TempoTracker = {
+    candidates: [],      // [{bpm, conf, time}]
+    stableBPM: null,
+    stableConf: 0,
+    lockCount: 0,
+    displayBPM: null,
+
+    feed(bpm, conf) {
+      const now = performance.now();
+      // Skip low-confidence candidates unless we have few samples
+      if (conf < 0.12 && this.candidates.length > 5) return;
+      this.candidates.push({ bpm, conf, time: now });
+      // Keep last 12 seconds
+      while (this.candidates.length && this.candidates[0].time < now - 12000) {
+        this.candidates.shift();
+      }
+      this.updateConsensus();
+    },
+
+    updateConsensus() {
+      if (this.candidates.length < 3) return;
+
+      // Build weighted histogram with Gaussian kernel
+      const hist = {};
+      for (const c of this.candidates) {
+        const spread = 2; // BPM spread
+        for (let b = c.bpm - spread * 2; b <= c.bpm + spread * 2; b++) {
+          const dist = Math.abs(b - c.bpm) / spread;
+          const w = c.conf * Math.exp(-dist * dist);
+          hist[b] = (hist[b] || 0) + w;
+        }
+      }
+
+      // Find peak
+      let bestBpm = null, bestWeight = 0;
+      for (const [bpm, w] of Object.entries(hist)) {
+        if (w > bestWeight) { bestWeight = w; bestBpm = parseInt(bpm); }
+      }
+
+      // Require sufficient evidence (adjusted for candidate count)
+      const minWeight = Math.min(2.5, 0.4 * this.candidates.length);
+      if (bestWeight >= minWeight && bestBpm >= 30 && bestBpm <= 240) {
+        // Check if this is a new consensus
+        if (this.stableBPM === null || Math.abs(bestBpm - this.stableBPM) > 8) {
+          this.lockCount = 0;
+        }
+        this.stableBPM = bestBpm;
+        this.lockCount++;
+        this.stableConf = Math.min(1, bestWeight / Math.max(4, this.candidates.length * 0.3));
+        // Only display when locked for several cycles
+        if (this.lockCount >= 3) {
+          this.displayBPM = bestBpm;
+        }
+      } else if (this.lockCount > 0) {
+        // Slowly lose lock
+        this.lockCount--;
+        if (this.lockCount <= 0) {
+          this.stableBPM = null;
+          this.displayBPM = null;
+          this.stableConf = 0;
+        }
+      }
+    },
+
+    getBPM() { return this.displayBPM; },
+    getConf() { return this.stableConf; },
+    isLocked() { return this.lockCount >= 3; },
+    reset() {
+      this.candidates = [];
+      this.stableBPM = null;
+      this.stableConf = 0;
+      this.lockCount = 0;
+      this.displayBPM = null;
+    }
+  };
+
   // ─── Mic BPM Detection ─────────────────
 
   micBtn.addEventListener('click', async () => {
@@ -552,6 +633,7 @@
       micCtx2d = micCanvas.getContext('2d');
 
       micListening = true;
+      TempoTracker.reset();
       micBtn.textContent = '停止监听';
       micBtn.classList.add('listening');
       micBpm.textContent = '—';
@@ -576,6 +658,7 @@
     micDataArray = null; micPrevSpectrum = null;
     micFluxBuffer = []; micFluxCanvasArr = []; micFrameCount = 0;
     if (micAnimFrame) cancelAnimationFrame(micAnimFrame);
+    TempoTracker.reset();
     micBtn.textContent = '开始监听';
     micBtn.classList.remove('listening');
     micBpm.textContent = '—';
@@ -585,12 +668,14 @@
   }
 
   // Sub-band definitions for spectral flux (sr~44100, fftSize=1024 → 512 bins, ~43Hz/bin)
+  // Sub-bands focused on RHYTHMIC content (hi-hats, snares, transients)
+  // Low frequencies (bass/pads) are de-weighted to avoid false onsets
   const SUB_BANDS = [
-    { lo:0,  hi:2,   w:0.8 },  // 0-130Hz kick
-    { lo:3,  hi:7,   w:1.0 },  // 130-345Hz snare body
-    { lo:8,  hi:25,  w:1.2 },  // 345-1100Hz toms
-    { lo:26, hi:100, w:1.5 },  // 1100-4300Hz hihats
-    { lo:101,hi:200, w:1.3 },  // 4300-8600Hz crisp
+    { lo:0,   hi:4,   w:0.4 },  // 0-215Hz: bass/kick (low weight - pitch varies)
+    { lo:5,   hi:15,  w:0.7 },  // 215-645Hz: snare body
+    { lo:16,  hi:40,  w:1.0 },  // 645-1720Hz: snare crack
+    { lo:41,  hi:100, w:1.6 },  // 1720-4300Hz: hi-hats (most rhythmic)
+    { lo:101, hi:250, w:1.4 },  // 4300-10750Hz: crisp transients
   ];
 
   function bandEnergy(spec, lo, hi) {
@@ -663,18 +748,32 @@
       micEnergyLabel.textContent = '峰值:' + peak + ' | +' + db + 'dB | 通量:' + flux.toFixed(3);
     }
 
-    // Tempo estimation
+    // Tempo estimation via autocorrelation → consensus tracker
     if (micFrameCount % TEMPO_TICK === 0 && micFluxBuffer.length >= 60) {
       let fps = 60;
       if (micFluxBuffer.length >= 2) {
         fps = (micFluxBuffer.length - 1) / ((micFluxBuffer[micFluxBuffer.length-1].t - micFluxBuffer[0].t) / 1000);
       }
       const r = tempoAC(micFluxBuffer, fps);
-      if (r && r.confidence > 0.15) {
-        micBpm.textContent = r.bpm;
-        micConfidence.textContent = '置信度 ' + Math.round(r.confidence*100) + '% · 点击应用';
-        micBpm.style.cursor = 'pointer';
-        micBpm.onclick = () => { setBPM(r.bpm); if (!isPlaying) startMetronome(); };
+      if (r) {
+        // Feed into consensus tracker (histogram voting)
+        TempoTracker.feed(r.bpm, r.confidence);
+
+        // Display stable consensus, not raw instant reading
+        const stable = TempoTracker.getBPM();
+        const conf = TempoTracker.getConf();
+        const locked = TempoTracker.isLocked();
+
+        if (stable) {
+          micBpm.textContent = stable;
+          const confPct = Math.round(conf * 100);
+          micConfidence.textContent = (locked ? '🔒 已锁定' : '…收敛中') + ' · 置信度 ' + confPct + '% · 点击应用';
+          micBpm.style.cursor = 'pointer';
+          micBpm.onclick = () => { setBPM(stable); if (!isPlaying) startMetronome(); };
+        } else {
+          micBpm.textContent = '—';
+          micConfidence.textContent = '正在分析节奏… (' + TempoTracker.candidates.length + ' 帧)';
+        }
       }
     }
 
