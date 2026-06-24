@@ -1,0 +1,22 @@
+{
+  "name": "智能节拍器",
+  "short_name": "节拍器",
+  "description": "智能节拍器 - 实时节奏检测、打拍测速、多种音色",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1c1c1e",
+  "theme_color": "#1c1c1e",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

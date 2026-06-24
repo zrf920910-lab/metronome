@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#1c1c1e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Metronome" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <title>智能节拍器</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="title">智能节拍器</h1>
+      <span class="subtitle">Metronome Pro</span>
+    </header>
+
+    <!-- BPM Display -->
+    <div class="bpm-display glass-card">
+      <div class="bpm-value" id="bpmValue">120</div>
+      <div class="bpm-label">BPM</div>
+      <div class="bpm-tap-hint" id="tapHint">点击上方数字或下方区域打拍</div>
+    </div>
+
+    <!-- Tempo Dial / Slider -->
+    <div class="dial-container glass-card">
+      <div class="dial-ring">
+        <svg viewBox="0 0 200 200" class="dial-svg">
+          <circle cx="100" cy="100" r="88" class="dial-track" />
+          <circle cx="100" cy="100" r="88" class="dial-progress" id="dialProgress"
+            stroke-dasharray="553" stroke-dashoffset="0"
+            transform="rotate(-90 100 100)" />
+        </svg>
+        <div class="dial-knob" id="dialKnob">
+          <div class="dial-knob-inner"></div>
+        </div>
+      </div>
+      <input type="range" class="bpm-slider" id="bpmSlider" min="30" max="240" value="120" />
+    </div>
+
+    <!-- Preset Tempos -->
+    <div class="presets glass-card">
+      <button class="preset-btn" data-bpm="60">60</button>
+      <button class="preset-btn" data-bpm="70">70</button>
+      <button class="preset-btn" data-bpm="80">80</button>
+      <button class="preset-btn" data-bpm="90">90</button>
+      <button class="preset-btn" data-bpm="100">100</button>
+      <button class="preset-btn" data-bpm="110">110</button>
+      <button class="preset-btn active" data-bpm="120">120</button>
+      <button class="preset-btn" data-bpm="130">130</button>
+    </div>
+
+    <!-- Beat & Sound Controls -->
+    <div class="controls-row">
+      <div class="control-group glass-card">
+        <label class="control-label">拍号</label>
+        <div class="beat-selector">
+          <button class="beat-btn" id="beatDown">−</button>
+          <span class="beat-value" id="beatValue">4</span>
+          <span class="beat-sep">/</span>
+          <span class="beat-value">4</span>
+          <button class="beat-btn" id="beatUp">+</button>
+        </div>
+      </div>
+      <div class="control-group glass-card">
+        <label class="control-label">音色</label>
+        <select class="sound-select" id="soundSelect">
+          <option value="wood">木鱼</option>
+          <option value="click" selected>电子</option>
+          <option value="beep">嘀声</option>
+          <option value="stick">鼓棒</option>
+          <option value="clave">响棒</option>
+          <option value="rim">鼓边</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Volume -->
+    <div class="volume-control glass-card">
+      <label class="control-label">音量</label>
+      <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="80" />
+    </div>
+
+    <!-- Start/Stop -->
+    <button class="play-btn glass-card" id="playBtn">
+      <svg class="play-icon" viewBox="0 0 24 24" id="playIcon">
+        <polygon points="6,3 20,12 6,21" />
+      </svg>
+      <svg class="pause-icon hidden" viewBox="0 0 24 24" id="pauseIcon">
+        <rect x="5" y="3" width="5" height="18" rx="1" />
+        <rect x="14" y="3" width="5" height="18" rx="1" />
+      </svg>
+      <span id="playLabel">启动</span>
+    </button>
+
+    <!-- Beat Indicators -->
+    <div class="beat-indicators" id="beatIndicators">
+      <span class="beat-dot active"></span>
+      <span class="beat-dot"></span>
+      <span class="beat-dot"></span>
+      <span class="beat-dot"></span>
+    </div>
+
+    <!-- Tap Tempo Area -->
+    <div class="tap-area glass-card" id="tapArea">
+      <div class="tap-label">👆 点击此处打拍测速</div>
+      <div class="tap-bpm" id="tapBpm">—</div>
+      <div class="tap-count" id="tapCount">轻触跟随节奏</div>
+    </div>
+
+    <!-- Mic BPM Detection -->
+    <div class="mic-section glass-card">
+      <div class="mic-header">
+        <span class="mic-label">🎤 实时节奏检测</span>
+        <button class="mic-btn" id="micBtn">开始监听</button>
+      </div>
+      <div class="mic-bpm" id="micBpm">—</div>
+      <div class="mic-confidence" id="micConfidence"></div>
+      <canvas class="mic-visualizer" id="micCanvas"></canvas>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
